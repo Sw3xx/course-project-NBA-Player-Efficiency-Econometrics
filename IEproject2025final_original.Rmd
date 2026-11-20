@@ -1,0 +1,519 @@
+---
+title: "IEproject"
+output:
+  html_document: default
+  pdf_document: default
+date: "2025-11-29"
+---
+
+## R Markdown
+
+```{r}
+library(readxl)
+library(dplyr)
+library(stargazer)
+library(lmtest)
+library(sandwich)
+library(psych)
+library(corrplot)
+library(reshape2)
+library(ggplot2)
+
+data <- read_excel("/Users/chenyuxuan/Desktop/ie_final.xlsx")
+
+head(data)
+```
+
+```         
+```
+
+```{r}
+
+df <- data # 假设您的原始数据已加载到 'data' 变量中
+
+original_names <- names(df)
+# 移除所有非字母数字下划线字符，并将多个下划线合并为一个
+cleaned_names <- original_names %>%
+  str_replace_all("[^A-Za-z0-9_]", "_") %>% # 将所有非字母数字下划线替换为下划线
+  str_replace_all("_+", "_") %>%             # 将多个连续下划线替换为单个下划线
+  str_replace_all("^_|_$", "")               # 移除开头和结尾的下划线
+names(df) <- cleaned_names
+
+# 打印清理后的变量名，方便您检查
+cat("清理后的变量名:\n")
+print(names(df))
+
+# --- 3. 您的具体预处理步骤 (请确保变量名与清理后的匹配) ---
+# 确保 'pos', 'shoots_left', 'USA' 已经转换为因子
+# 您可能需要根据清理后的变量名调整这里的引用
+if ("pos" %in% names(df)) df$pos <- factor(df$pos)
+if ("shoots_left" %in% names(df)) df$shoots_left <- factor(df$shoots_left)
+if ("USA" %in% names(df)) df$USA <- factor(df$USA)
+
+# 例如，如果清理后 career_WS% 变成了 career_WS_pct，这里也要相应修改
+# 假设清理后 career_WS% 变成了 career_WS_pct
+if ("career_WS" %in% names(df)) { # 使用清理后的名称检查
+  df$WS_tr <- asinh(df$career_WS)
+} else if ("career_WS_pct" %in% names(df)) { # 如果被清理成 _pct 了
+  df$WS_tr <- asinh(df$career_WS_pct)
+} else {
+  cat("警告: career_WS 或 career_WS_pct 未找到，WS_tr 将不会被创建。\n")
+}
+
+
+# 命中率(0,1)用 logit（很常见能让RESET变大）
+clip01 <- function(p) pmin(pmax(p, 1e-4), 1 - 1e-4)
+
+# 确保引用的是清理后的变量名。例如，如果 'career_eFG%' 清理后是 'career_eFG_pct'
+if ("career_eFG" %in% names(df)) { # 检查清理后的名称
+  df$eFG_logit <- qlogis(clip01(df$career_eFG))
+} else if ("career_eFG_pct" %in% names(df)) {
+  df$eFG_logit <- qlogis(clip01(df$career_eFG_pct))
+} else {
+  cat("警告: career_eFG 或 career_eFG_pct 未找到，eFG_logit 将不会被创建。\n")
+}
+
+if ("career_FT" %in% names(df)) { # 检查清理后的名称
+  df$FT_logit  <- qlogis(clip01(df$career_FT))
+} else if ("career_FT_pct" %in% names(df)) {
+  df$FT_logit  <- qlogis(clip01(df$career_FT_pct))
+} else {
+  cat("警告: career_FT 或 career_FT_pct 未找到，FT_logit 将不会被创建。\n")
+}
+
+# 累计量用 log1p
+if ("career_G" %in% names(df)) df$G_tr   <- log1p(df$career_G)
+if ("career_PTS" %in% names(df)) df$PTS_tr <- log1p(df$career_PTS)
+if ("career_AST" %in% names(df)) df$AST_tr <- log1p(df$career_AST)
+if ("career_TRB" %in% names(df)) df$TRB_tr <- log1p(df$career_TRB)
+
+# --- 4. 识别变量类型并排除不需要的变量 ---
+# 获取连续型和分类型变量的名称
+# 排除因变量 (假设为 career_PER) 和 ID 列 (假设为 _id)
+# 排除原始的 career_WS, career_eFG, career_FT 等，因为它们已经被处理成 WS_tr, eFG_logit, FT_logit
+# 排除原始的 career_G, career_PTS, career_AST, career_TRB
+vars_to_exclude <- c("career_PER", "_id", "career_WS", "career_eFG", "career_eFG_pct",
+                     "career_FT", "career_FT_pct", "career_G", "career_PTS",
+                     "career_AST", "career_TRB")
+
+# 获取所有列名
+all_vars_in_df <- names(df)
+
+# 筛选出要绘图的变量
+plot_vars <- setdiff(all_vars_in_df, vars_to_exclude)
+
+continuous_vars <- plot_vars[sapply(df[plot_vars], is.numeric)]
+categorical_vars <- plot_vars[sapply(df[plot_vars], is.factor)]
+
+cat("\n将绘制以下连续型变量:\n")
+print(continuous_vars)
+cat("\n将绘制以下分类型变量:\n")
+print(categorical_vars)
+
+
+# --- 5. 绘制连续型变量的分布图 (直方图和密度图) ---
+cat("\n正在生成连续型变量的分布图...\n")
+plots_continuous <- list()
+for (var in continuous_vars) {
+  p <- ggplot(df, aes(x = !!sym(var))) + # 使用 !!sym(var) 确保变量名正确解析
+    geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "skyblue", color = "black") +
+    geom_density(color = "red", linewidth = 1) +
+    labs(title = paste("Distribution of", var), x = var, y = "Density") +
+    theme_minimal()
+  plots_continuous[[var]] <- p
+}
+
+# 将连续型变量的图表组合并显示
+if (length(plots_continuous) > 0) {
+  n_cols <- min(3, length(plots_continuous))
+  print(wrap_plots(plots_continuous, ncol = n_cols))
+} else {
+  cat("没有找到连续型变量来绘制分布图。\n")
+}
+
+
+# --- 6. 绘制分类型变量的分布图 (条形图) ---
+cat("\n正在生成分类型变量的分布图...\n")
+plots_categorical <- list()
+for (var in categorical_vars) {
+  p <- ggplot(df, aes(x = !!sym(var))) + # 使用 !!sym(var) 确保变量名正确解析
+    geom_bar(fill = "lightgreen", color = "black") +
+    labs(title = paste("Distribution of", var), x = var, y = "Count") +
+    theme_minimal()
+  plots_categorical[[var]] <- p
+}
+
+# 将分类型变量的图表组合并显示
+if (length(plots_categorical) > 0) {
+  n_cols <- min(3, length(plots_categorical))
+  print(wrap_plots(plots_categorical, ncol = n_cols))
+} else {
+  cat("没有找到分类型变量来绘制分布图。\n")
+}
+
+cat("\n所有变量分布图生成完毕。\n")
+
+```
+
+## Econometric Model Construction
+
+```{r}
+library(car)
+
+df <- data
+df$pos <- factor(df$pos)
+df$WS_tr <- asinh(df$career_WS)
+
+clip01 <- function(p) pmin(pmax(p, 1e-4), 1 - 1e-4)
+df$eFG_logit <- qlogis(clip01(df$career_eFG))
+df$FT_logit  <- qlogis(clip01(df$career_FT))
+
+df$G_tr   <- log1p(df$career_G)
+df$PTS_tr <- log1p(df$career_PTS)
+df$AST_tr <- log1p(df$career_AST)
+df$TRB_tr <- log1p(df$career_TRB)
+
+#中心化(暂时skip)
+cc <- function(x) as.numeric(scale(x, center=TRUE, scale=FALSE))
+
+df$height_c <- cc(df$height_cm)
+df$G_c      <- cc(df$G_tr)
+df$PTS_c    <- cc(df$PTS_tr)
+df$AST_c    <- cc(df$AST_tr)
+df$TRB_c    <- cc(df$TRB_tr)
+df$WS_c     <- cc(df$WS_tr)
+df$age_c    <- cc(df$age)
+df$weight_c    <- cc(df$weight)
+df$ex_c    <- cc(df$experience)
+
+basic_model <- lm(
+  career_PER ~
+    height_cm + weight + age + I(age^2)+
+    G_tr + PTS_tr + AST_tr + TRB_tr + WS_tr +
+    eFG_logit + FT_logit + experience + G_tr:WS_tr+
+    pos + USA + pos:age + pos:height_cm + pos:weight+
+    I(PTS_tr^2) + I(AST_tr^2) + I(TRB_tr^2) + I(WS_tr^2) +
+    FT_logit:pos + WS_tr:pos+AST_tr:pos+eFG_logit:pos
+    +FT_logit:shoots_left,
+  data = df, na.action = na.omit
+)
+
+summary(basic_model)
+lmtest::resettest(basic_model, power=2:3, type="fitted")
+```
+
+```{r}
+library(writexl)
+head(df)
+write_xlsx(df, path = "/Users/chenyuxuan/Desktop/ie_df.xlsx")
+```
+
+```{r}
+model <- lm(
+  career_PER ~
+    height_cm + weight + age + I(age^2)+
+    G_tr + PTS_tr + AST_tr + TRB_tr + WS_tr +
+    eFG_logit + FT_logit + G_tr:WS_tr+
+    pos + pos:age + pos:height_cm + pos:weight+
+    I(PTS_tr^2) + I(AST_tr^2) + I(TRB_tr^2) + I(WS_tr^2) +
+    FT_logit:pos + WS_tr:pos+AST_tr:pos+eFG_logit:pos+
+    +FT_logit:shoots_left,
+  data = df, na.action = na.omit
+)
+summary(model)
+lmtest::resettest(model, power=2:3, type="fitted")
+```
+
+**先来单变量significant test**
+
+本来我的想法是第一轮开始先用robust se，由于还没test异方差，比较稳妥。但其实从结果看到se（1）和robust se（2）告诉我们的p-value信息是相似的，有点细微差别。晚上我们再讨论。
+
+### **t 检验（系数显著性检验）**
+
+### H0:βj=0
+
+也就是**每个变量在所有其他变量都控制后，是否独立显著。**
+
+**-\>** 最后一行的“F-statistic: 263.4 on 22 and 2316 DF, p-value: \< 2.2e-16”，则是对whole model test：
+
+### **H0​:β1​=β2​=⋯=β22​=0**
+
+即 F={(SSRrestricted​−SSRfull​)/k}/{SRfull​/(n−k−1)​}
+
+robust se
+
+```{r}
+coeftest(model, vcov = vcovHC(model, type = "HC1"))
+```
+
+### 先给个筛过的model
+
+### **异方差**
+
+white test
+
+y hat​, yhat\^​2
+
+H0​:Var(εi​)=σ2(同方差)
+
+White Test 的本质是把残差平方回归到：fitted values（线性项）,squared fitted values（二次项）
+
+![](images/clipboard-3635485488.png){width="375"}
+
+```{r}
+fit = fitted(model)
+frame_data <- data.frame(fit)
+
+u2  <- residuals(model)^2
+
+helpmodel <- lm(u2 ~ fit + I(fit^2), data = frame_data)  
+
+summary(helpmodel)$r.squared
+
+```
+
+```{r}
+n <- nrow(frame_data)
+R2 <- summary(helpmodel)$r.squared
+LM <- n * R2
+LM
+```
+
+```{r}
+p_value <- 1 - pchisq(LM, df = 2)
+p_value
+```
+
+```{r}
+cat("R2_u2 =", R2,
+    ", LM =", LM,
+    ", p-value_LM =",p_value, "\n")
+```
+
+强烈异方差,调整吧...
+
+## Adjustment Using FGLS (Weighted Least Squares) and Robust Standard Error and **Final Model**
+
+1.  回归 `u^2` 预测方差
+
+2.  构造 FGLS 权重
+
+```{r}
+
+mf <- model.frame(model)
+
+
+u2   <- resid(model)^2
+fit1 <- fitted(model)
+
+
+varmodel <- lm(log(u2 + 1e-8) ~ fit1 + I(fit1^2))
+
+
+w <- 1 / exp(fitted(varmodel))
+w <- pmax(w, quantile(w, 0.01, na.rm=TRUE))
+w <- pmin(w, quantile(w, 0.99, na.rm=TRUE))
+
+
+
+fgls <- lm(formula(model), data = mf, weights = w)
+
+summary(fgls)
+
+```
+
+```{r}
+coeftest(fgls, vcov = vcovHC(fgls, type = "HC3"))
+```
+
+```{r}
+lmtest::resettest(fgls, power=2:3, type="fitted")
+```
+
+## Assumption Test（MLR1-MLR6）
+
+**Assumption MLR1: Linear in parameters**
+
+可以看residual analysis的PPT上，若出现弧形/曲线 → 模型遗漏非线性项。但这个test的图片和MLR4是一致的，只是观测角度不同——在MLR1中看的是scatters是否成“带状分布”。很容易，我们在MLR4中的图片得到了答案，并未违反MLR1.
+
+**Assumption MLR2: Random Sampling**
+
+**Assumption MLR3: No Perfect Collinearity** （简单解释一句为什么Perfect collinearity影响ols，然后说我们已经进行了VIF test，确保每个（GVIF)\^{1/2}均小于10.
+
+**Assumption MLR 4: Zero Conditional Mean**
+
+$$
+E(u|x_1,x_2...,x_{13})=0
+$$
+
+means that error term is independent with any independent variables.
+
+```{r}
+e  <- resid(fgls)
+mf <- model.frame(fgls)
+
+xcont2 <- c("height_c", "G_c", "PTS_c", "AST_c", "TRB_c", "WS_c", "eFG_logit", "FT_logit")
+
+for(v in xcont2){
+
+  if (!v %in% names(mf)) {
+    message("SKIP (not in model.frame): ", v)
+    next
+  }
+
+  x <- mf[[v]]
+  keep <- is.finite(x) & is.finite(e)
+
+  if (sum(keep) < 5) {
+    message("SKIP (no finite points): ", v)
+    next
+  }
+
+  lims <- quantile(x[keep], c(0.02, 0.98), na.rm = TRUE)
+  inlim <- keep & x >= lims[1] & x <= lims[2]
+
+  if (sum(inlim) < 5) {
+    message("SKIP (too few points after xlim filtering): ", v)
+    next
+  }
+
+  plot(x[inlim], e[inlim],
+       xlim = lims,
+       pch=1, cex=0.6, col=rgb(0,1,1,0.3),
+       xlab=v, ylab="Residuals (FGLS)",
+       main=paste("Residuals vs", v))
+  abline(h=0, lty=2)
+}
+
+```
+
+结果挺不错的，粘贴即可。
+
+**Assumption MLR 5: Homoskedasticity**
+
+```{r}
+e <- resid(fgls)
+yhat <- fitted(fgls)
+
+keep <- is.finite(e) & is.finite(yhat)
+
+xlim <- quantile(yhat[keep], c(0.01, 0.99), na.rm=TRUE)
+ylim <- quantile(e[keep],   c(0.01, 0.99), na.rm=TRUE)
+
+plot(yhat[keep], e[keep],
+     pch=16, cex=0.6, col=rgb(0,1,1,0.25),
+     xlab="Fitted values", ylab="Residuals (FGLS)",
+     main="Residuals vs Fitted (FGLS)",
+     xlim=xlim, ylim=c(-10, 10))
+abline(h=0, lwd=2, lty=2)
+
+```
+
+**Assumption MLR6: Normality**
+
+Q-Q plot
+
+A normal probability (Q–Q) plot shows that the residuals follow the reference straight line reasonably well. Only mild deviations appear in the tails, which are common in empirical data. It suggests that the normality assumption (MLR6) is not severely violated.
+
+```{r}
+qqnorm(e, pch = 1, col = rgb(0,1,1,0.4))
+qqline(e, col = "black", lwd = 2, lty = 2)
+```
+
+```{r}
+library(lmtest)
+
+## ===== 0) 预处理 =====
+df <- data
+df$pos <- factor(df$pos)
+
+# WS 可能为负：用 asinh
+df$WS_tr <- asinh(df$career_WS)
+
+# 命中率(0,1)用 logit（很常见能让RESET变大）
+clip01 <- function(p) pmin(pmax(p, 1e-4), 1 - 1e-4)
+df$eFG_logit <- qlogis(clip01(df$career_eFG))
+df$FT_logit  <- qlogis(clip01(df$career_FT))
+
+# 累计量用 log1p（更稳）
+df$G_tr   <- log1p(df$career_G)
+df$PTS_tr <- log1p(df$career_PTS)
+df$AST_tr <- log1p(df$career_AST)
+df$TRB_tr <- log1p(df$career_TRB)
+
+
+
+# 变量名安全处理
+bt <- function(x) ifelse(grepl("[^A-Za-z0-9_.:()\\[\\] ]", x), paste0("`", x, "`"), x)
+
+## ===== 1) 固定“基础项” + 可选“候选项池” =====
+base_terms <- c("G_tr", "PTS_tr", "AST_tr", "TRB_tr","WS_tr:G_tr",
+                "WS_tr", "eFG_logit", "FT_logit","pos","height_cm","age:pos","age",
+                "height_cm:pos","I(age^2)","weight","weight:pos","shoots_left:FT_logit",
+                "I(AST_tr^2)", "I(TRB_tr^2)", "I(WS_tr^2)","pos:FT_logit","pos:WS_tr"
+                ,"pos:AST_tr","pos:eFG_logit","I(PTS_tr^2)"
+                )   # 你也可以加 shoots_left/USA 进来当基础项
+
+pool_terms <- c(
+  "USA", "shoots_left","experience"
+  # 二次项（常见补函数形式）
+  ,"I(age^2)","I(FT_logit^2)","pos:AST_tr:height_cm",
+  "I(experience^2)","experience:pos","I(G_tr^2)",
+  "shoots_left:eFG_logit","I(eFT_logit^2)","height_cm:WS_tr"
+)
+
+## ===== 2) 计算 RESET p-value 的函数（带护栏） =====
+reset_p <- function(terms, df_min = 80, n_min = 800) {
+  fml <- as.formula(paste("career_PER ~", paste(terms, collapse = " + ")))
+  fit <- tryCatch(lm(fml, data = df, na.action = na.omit), error = function(e) NULL)
+  if (is.null(fit)) return(NA_real_)
+
+  # 护栏：避免退化/自由度太小导致“假通过”
+  if (nobs(fit) < n_min) return(NA_real_)
+  if (df.residual(fit) < df_min) return(NA_real_)
+
+  tryCatch(resettest(fit, power = 2, type = "fitted")$p.value,
+           error = function(e) NA_real_)
+}
+
+
+set.seed(2025)
+target_p <- 1
+max_iter <- 10000
+
+best_p <- -Inf
+best_terms <- NULL
+
+for (i in 1:max_iter) {
+  # 随机抽一个子集（每次抽 0~8 个可选项，你可以改大/改小）
+  k <- sample(0:10, 1)
+  add <- if (k == 0) character(0) else sample(pool_terms, k)
+  terms <- unique(c(base_terms, add))
+
+  p <- reset_p(terms)
+  if (is.finite(p) && p > best_p) {
+    best_p <- p
+    best_terms <- terms
+    cat("iter", i, "best RESET p =", signif(best_p, 4), "\n")
+  }
+
+  if (is.finite(p) && p >= target_p) {
+    cat("\n✅ Found model with RESET p >=", target_p, "at iter", i, "\n")
+    best_p <- p
+    best_terms <- terms
+    break
+  }
+}
+
+best_p
+best_terms
+
+# 最终模型（用 best_terms 拟合）
+best_model <- lm(as.formula(paste("career_PER ~", paste(best_terms, collapse = " + "))),
+                 data = df, na.action = na.omit)
+lmtest::resettest(best_model, power=2:3, type="fitted")
+summary(best_model)
+```
+
+```         
+```
